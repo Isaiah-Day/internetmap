@@ -2,3 +2,16 @@
 .env
 agent.json
 .DS_Store
+
+# Collected data / generated graphs (large)
+posts.jsonl
+dids.json
+follows.jsonl
+follows_done.txt
+follows_failed.txt
+handles.jsonl
+graph.json
+graph_seeds.json
+graph_seeds_min_followers.json
+fetch.log
+fetch.pid

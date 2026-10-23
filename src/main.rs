@@ -1,94 +1,82 @@
-mod collect;
 mod bsky;
-use eframe::{run_native, App, CreationContext, NativeOptions};
-use egui_graphs::{DefaultGraphView, Graph};
+mod collect;
+mod graph;
 
-
+use std::path::Path;
 use std::time::Duration;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
 
-use serde_json::Value;
+const COLLECT_SECS: u64 = 5 * 60;
 
-// pub struct BasicApp {
-//     g: egui_graphs::Graph,
-// }
+/// Reads a `--flag value` pair from the command line.
+fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
 
-// impl BasicApp {
-//     fn new(_: &eframe::CreationContext<'_>) -> Self {
-//         Self { g:generate_graph() }
-//     }
-// }
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // cmd line args
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
-// fn generate_graph() -> Graph {
-//     let mut g = Graph::new();
+    let recollect = args.iter().any(|arg| arg == "--recollect");
+    let limit = arg_value(&args, "--limit").and_then(|n| n.parse::<usize>().ok());
+    let max_pages = arg_value(&args, "--max-pages")
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(bsky::MAX_PAGES);
+    let concurrency = arg_value(&args, "--concurrency")
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(bsky::CONCURRENCY);
+    let requests_per_sec = arg_value(&args, "--rps")
+        .and_then(|n| n.parse::<f64>().ok())
+        .unwrap_or(bsky::REQUESTS_PER_SEC);
+    let min_followers = arg_value(&args, "--min-followers")
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or(graph::DEFAULT_MIN_FOLLOWERS);
 
-//     let a = g.add_node(());
-//     let b = g.add_node(());
-//     let c = g.add_node(());
-
-//     g.add_edge(a, b, ());
-//     g.add_edge(b, c, ());
-//     g.add_edge(c, a, ());
-
-//     g
-// }
-// impl eframe::App for BasicApp {
-//     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
-//         egui::CentralPanel::default().show(ui, |ui| {
-//             egui_graphs::DefaultGraphView::new().show(ui, &mut self.g);
-//         });
-//     }
-// }
-
-fn read_jsonl(path: &str) -> std::io::Result<Vec<Value>> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = line?;
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue; // Skip empty lines
-        }
-        match serde_json::from_str::<Value>(trimmed) {
-            Ok(value) => records.push(value),
-            Err(e) => {
-                eprintln!("Skipping invalid JSON at line {}: {}", line_num + 1, e);
-            }
-        }
+    // collect and extract dids if not already done so
+    if recollect || !Path::new(collect::DIDS_PATH).exists() {
+        collect::collect_and_extract(Duration::from_secs(COLLECT_SECS)).await?;
+    } else {
+        println!(
+            "Using existing {} (pass --recollect to fetch fresh posts)",
+            collect::DIDS_PATH
+        );
     }
 
-    Ok(records)
-}
+    // 
+    let all_dids = collect::load_dids()?;
+    let seeds: Vec<String> = match limit {
+        Some(n) => all_dids.into_iter().take(n).collect(),
+        None => all_dids,
+    };
 
-fn extract_dids(records: &[Value]) -> Vec<String> {
-    records
+    let done = bsky::load_done();
+    let pending: Vec<String> = seeds
         .iter()
-        .filter_map(|r| r["did"].as_str().map(String::from))
-        .collect()
-}
+        .filter(|did| !done.contains(*did))
+        .cloned()
+        .collect();
 
-fn save_dids(path: &str, dids: &[String]) -> std::io::Result<()> {
-    let file = File::create(path)?;
-    serde_json::to_writer_pretty(file, dids)?;
-    Ok(())
-}
+    println!(
+        "Seeds: {} | already fetched: {} | pending: {}",
+        seeds.len(),
+        seeds.len() - pending.len(),
+        pending.len()
+    );
 
-fn main() -> std::io::Result<()>{
-    // collect::collect(Duration::from_secs(10));
-    // eframe::run_native(
-    //     "egui_graphs_basic_demo",
-    //     eframe::NativeOptions::default(),
-    //     Box::new(|cc| Ok(Box::new(BasicApp::new(cc)))),
-    // )
-    // .unwrap();
-    
-    let records: Vec<Value> = read_jsonl("posts.jsonl")?;
-    println!("Loaded {} records", records.len());
-    let dids = extract_dids(&records);
-    save_dids("dids.json", &dids)?;
-    println!("Saved {} DIDs to dids.json", dids.len());
+    if pending.is_empty() {
+        println!("All seeds already fetched; rebuilding graph from existing data.");
+    } else {
+        println!(
+            "Fetching at {requests_per_sec} req/s, {concurrency} concurrent, max {max_pages} pages/account"
+        );
+        bsky::fetch_all_follows(&pending, concurrency, max_pages, requests_per_sec).await?;
+    }
+
+    // create directed graph
+    graph::build_graphs(&seeds, min_followers)?;
+
     Ok(())
 }
