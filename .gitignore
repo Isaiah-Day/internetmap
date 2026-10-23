@@ -1,0 +1,4 @@
+/target
+.env
+agent.json
+.DS_Store

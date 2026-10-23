@@ -1,0 +1,16 @@
+[package]
+name = "internetmap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
+serde_json = "1"
+eframe = "0.36.2"
+egui_graphs = "0.32.0"
+egui = "0.36.2"
+atrium-api = "0.25.8"
+atrium-xrpc-client = "0.5.15"
+dotenvy = "0.15.7"
