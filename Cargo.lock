@@ -2025,6 +2025,8 @@ dependencies = [
  "egui",
  "egui_graphs",
  "futures-util",
+ "petgraph",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",

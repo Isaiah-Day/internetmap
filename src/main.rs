@@ -1,6 +1,7 @@
 mod bsky;
 mod collect;
 mod graph;
+mod display;
 
 use std::path::Path;
 use std::time::Duration;
@@ -21,6 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let recollect = args.iter().any(|arg| arg == "--recollect");
+    let should_build = args.iter().any(|arg| arg=="--build-graph");
     let limit = arg_value(&args, "--limit").and_then(|n| n.parse::<usize>().ok());
     let max_pages = arg_value(&args, "--max-pages")
         .and_then(|n| n.parse::<usize>().ok())
@@ -76,7 +78,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // create directed graph
-    graph::build_graphs(&seeds, min_followers)?;
+    if should_build { 
+        graph::build_graphs(&seeds, min_followers)?;
+    }
+    
+    display::display()?;
 
     Ok(())
 }
