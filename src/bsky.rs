@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::sync::Arc;
@@ -10,7 +10,7 @@ use atrium_api::types::LimitedNonZeroU8;
 use atrium_api::types::string::AtIdentifier;
 use atrium_xrpc_client::reqwest::ReqwestClient;
 use futures_util::StreamExt;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::{Instant, sleep_until};
 
@@ -213,6 +213,41 @@ pub async fn create_agent() -> Option<AtpAgent<MemorySessionStore, ReqwestClient
     Some(agent)
 }
 
+/// Reads DID -> handle pairs from `handles.jsonl`, ignoring empty handles.
+pub fn load_handles() -> HashMap<String, String> {
+    let mut handles = HashMap::new();
+    if let Ok(file) = File::open(HANDLES_PATH) {
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if let (Some(did), Some(handle)) = (value["did"].as_str(), value["handle"].as_str()) {
+                if !handle.is_empty() {
+                    handles
+                        .entry(did.to_string())
+                        .or_insert_with(|| handle.to_string());
+                }
+            }
+        }
+    }
+    handles
+}
+
+/// Returns the handle for `did`, if one is known.
+pub fn handle_for<'a>(did: &str, handles: &'a HashMap<String, String>) -> Option<&'a str> {
+    handles
+        .get(did)
+        .map(String::as_str)
+        .filter(|handle| !handle.is_empty())
+}
+
+/// Human-readable name for an account: its handle, or the DID as a fallback.
+pub fn display_name(did: &str, handles: &HashMap<String, String>) -> String {
+    handle_for(did, handles)
+        .map(str::to_owned)
+        .unwrap_or_else(|| did.to_string())
+}
+
 /// Reads the set of actor DIDs whose following lists are already stored.
 pub fn load_done() -> HashSet<String> {
     let mut done = HashSet::new();
@@ -291,7 +326,6 @@ pub async fn fetch_all_follows(
 
                 writeln!(done_out, "{did}")?;
                 ok += 1;
-
                 if ok % 50 == 0 {
                     edges_out.flush()?;
                     handles_out.flush()?;

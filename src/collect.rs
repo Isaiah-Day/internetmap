@@ -12,6 +12,7 @@ pub const DIDS_PATH: &str = "dids.json";
 const URL: &str =
     "wss://jetstream2.us-east.bsky.network/subscribe?wantedCollections=app.bsky.feed.post";
 
+// scrape new bsky posts
 pub async fn collect(run_for: Duration) -> Result<(), Box<dyn std::error::Error>> {
     let (mut ws, _) = connect_async(URL).await?;
     let mut out = BufWriter::new(File::create("posts.jsonl")?);

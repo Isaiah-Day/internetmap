@@ -1,7 +1,7 @@
 mod bsky;
 mod collect;
-mod graph;
 mod display;
+mod graph;
 
 use std::path::Path;
 use std::time::Duration;
@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     let recollect = args.iter().any(|arg| arg == "--recollect");
-    let should_build = args.iter().any(|arg| arg=="--build-graph");
+    let should_build = args.iter().any(|arg| arg == "--build-graph");
     let limit = arg_value(&args, "--limit").and_then(|n| n.parse::<usize>().ok());
     let max_pages = arg_value(&args, "--max-pages")
         .and_then(|n| n.parse::<usize>().ok())
@@ -47,14 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // 
-    let all_dids = collect::load_dids()?;
+    // get DIDs as data
+    let all_dids: Vec<String> = collect::load_dids()?;
     let seeds: Vec<String> = match limit {
         Some(n) => all_dids.into_iter().take(n).collect(),
         None => all_dids,
     };
 
-    let done = bsky::load_done();
+    let done = bsky::load_done(); // how DIDs have been scraped for follow data
     let pending: Vec<String> = seeds
         .iter()
         .filter(|did| !done.contains(*did))
@@ -78,10 +78,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // create directed graph
-    if should_build { 
+    if should_build {
         graph::build_graphs(&seeds, min_followers)?;
     }
-    
+
+    graph::print_stats();
+
     display::display()?;
 
     Ok(())
