@@ -1,14 +1,19 @@
-mod bsky;
-mod collect;
-mod display;
-mod graph;
-
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
+#[cfg(not(target_arch = "wasm32"))]
+use internetmap::{bsky, collect, display, graph};
+
+#[cfg(not(target_arch = "wasm32"))]
 const COLLECT_SECS: u64 = 5 * 60;
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
 /// Reads a `--flag value` pair from the command line.
+#[cfg(not(target_arch = "wasm32"))]
 fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     args.iter()
         .position(|arg| arg == flag)
@@ -16,6 +21,7 @@ fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .map(String::as_str)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // cmd line args
@@ -37,52 +43,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|n| n.parse::<usize>().ok())
         .unwrap_or(graph::DEFAULT_MIN_FOLLOWERS);
 
-    // collect and extract dids if not already done so
-    if recollect || !Path::new(collect::DIDS_PATH).exists() {
-        collect::collect_and_extract(Duration::from_secs(COLLECT_SECS)).await?;
-    } else {
-        println!(
-            "Using existing {} (pass --recollect to fetch fresh posts)",
-            collect::DIDS_PATH
-        );
-    }
+    // // collect and extract dids if not already done so
+    // if recollect || !Path::new(collect::DIDS_PATH).exists() {
+    //     collect::collect_and_extract(Duration::from_secs(COLLECT_SECS)).await?;
+    // } else {
+    //     println!(
+    //         "Using existing {} (pass --recollect to fetch fresh posts)",
+    //         collect::DIDS_PATH
+    //     );
+    // }
 
-    // get DIDs as data
-    let all_dids: Vec<String> = collect::load_dids()?;
-    let seeds: Vec<String> = match limit {
-        Some(n) => all_dids.into_iter().take(n).collect(),
-        None => all_dids,
-    };
+    // // get DIDs as data
+    // let all_dids: Vec<String> = collect::load_dids()?;
+    // let seeds: Vec<String> = match limit {
+    //     Some(n) => all_dids.into_iter().take(n).collect(),
+    //     None => all_dids,
+    // };
 
-    let done = bsky::load_done(); // how DIDs have been scraped for follow data
-    let pending: Vec<String> = seeds
-        .iter()
-        .filter(|did| !done.contains(*did))
-        .cloned()
-        .collect();
+    // let done = bsky::load_done(); // how DIDs have been scraped for follow data
+    // let pending: Vec<String> = seeds
+    //     .iter()
+    //     .filter(|did| !done.contains(*did))
+    //     .cloned()
+    //     .collect();
 
-    println!(
-        "Seeds: {} | already fetched: {} | pending: {}",
-        seeds.len(),
-        seeds.len() - pending.len(),
-        pending.len()
-    );
+    // println!(
+    //     "Seeds: {} | already fetched: {} | pending: {}",
+    //     seeds.len(),
+    //     seeds.len() - pending.len(),
+    //     pending.len()
+    // );
 
-    if pending.is_empty() {
-        println!("All seeds already fetched; rebuilding graph from existing data.");
-    } else {
-        println!(
-            "Fetching at {requests_per_sec} req/s, {concurrency} concurrent, max {max_pages} pages/account"
-        );
-        bsky::fetch_all_follows(&pending, concurrency, max_pages, requests_per_sec).await?;
-    }
+    // if pending.is_empty() {
+    //     println!("All seeds already fetched; rebuilding graph from existing data.");
+    // } else {
+    //     println!(
+    //         "Fetching at {requests_per_sec} req/s, {concurrency} concurrent, max {max_pages} pages/account"
+    //     );
+    //     bsky::fetch_all_follows(&pending, concurrency, max_pages, requests_per_sec).await?;
+    // }
+    //
+    // // create directed graph
+    // if should_build {
+    //     graph::build_graphs(&seeds, min_followers)?;
+    // }
 
-    // create directed graph
-    if should_build {
-        graph::build_graphs(&seeds, min_followers)?;
-    }
-
-    graph::print_stats();
+    // graph::print_stats();
 
     display::display()?;
 

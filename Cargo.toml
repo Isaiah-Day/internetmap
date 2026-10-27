@@ -3,16 +3,32 @@ name = "internetmap"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
-futures-util = "0.3"
 serde_json = "1"
 eframe = "0.36.2"
 egui_graphs = "0.32.0"
 egui = "0.36.2"
+petgraph = "0.8.3"
+serde = "1.0.229"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 atrium-api = "0.25.8"
 atrium-xrpc-client = "0.5.15"
 dotenvy = "0.15.7"
-petgraph = "0.8.3"
-serde = "1.0.229"
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+futures-util = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Window", "Response"] }
+console_error_panic_hook = "0.1"

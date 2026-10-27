@@ -1,10 +1,20 @@
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
+use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::bsky;
+use crate::forces::force_direct_inside_communities;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::graph::detect_communities;
 use eframe::egui;
 use egui::epaint::{CircleShape, TextShape};
-use egui::{Color32, FontId, Pos2, Rect, Shape, Stroke, Vec2};
+use egui::{
+    Color32, ColorImage, FontId, Id, Pos2, Rect, Shape, Stroke, TextureHandle, TextureOptions, Vec2,
+};
 use egui_graphs::{
     DisplayEdge, DisplayNode, DrawContext, EdgeProps, GraphView, Layout, LayoutState, Node,
     NodeProps, SettingsInteraction, SettingsNavigation, SettingsStyle,
@@ -12,10 +22,12 @@ use egui_graphs::{
 use petgraph::graph::IndexType;
 use petgraph::stable_graph::StableGraph;
 use petgraph::{Directed, EdgeType};
-use serde_json::Value;
 
-use crate::bsky;
-use crate::graph::detect_communities;
+#[derive(serde::Deserialize)]
+struct GraphFile {
+    nodes: Vec<RawNode>,
+    edges: Vec<RawEdge>,
+}
 
 #[derive(serde::Deserialize)]
 struct RawEdge {
@@ -36,10 +48,13 @@ struct RawNode {
 
 #[derive(Clone, Debug)]
 struct MapNode {
-    handle: String,
+    // Arc keeps Node clones in egui_graphs' edge pass cheap. The node label is
+    // intentionally left empty; this handle is only materialized when shown.
+    handle: Arc<str>,
     followers: usize,
     community: usize,
     major: bool,
+    avatar: Option<Arc<ColorImage>>,
     pos: Pos2,
 }
 
@@ -85,16 +100,18 @@ impl Layout<FixedState> for FixedLayout {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct MapNodeShape {
     pos: Pos2,
     selected: bool,
     dragged: bool,
     hovered: bool,
     color: Color32,
-    label: String,
+    handle: Arc<str>,
     radius: f32,
     major: bool,
+    avatar: Option<Arc<ColorImage>>,
+    texture: Option<TextureHandle>,
 }
 
 impl From<NodeProps<MapNode>> for MapNodeShape {
@@ -105,9 +122,11 @@ impl From<NodeProps<MapNode>> for MapNodeShape {
             dragged: props.dragged,
             hovered: props.hovered,
             color: community_color(props.payload.community),
-            label: props.label,
+            handle: props.payload.handle.clone(),
             radius: node_radius(props.payload.followers),
             major: props.payload.major,
+            avatar: props.payload.avatar.clone(),
+            texture: None,
         }
     }
 }
@@ -140,19 +159,47 @@ impl<E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<MapNode, E, Ty, Ix> for 
             .into(),
         ];
 
+        let show_avatars = ctx.ctx.data(|data| {
+            data.get_temp::<bool>(Id::new("show_avatars"))
+                .unwrap_or(false)
+        });
+        if show_avatars {
+            if let Some(image) = &self.avatar {
+                let texture = self.texture.get_or_insert_with(|| {
+                    ctx.ctx.load_texture(
+                        format!("avatar:{}", self.handle),
+                        image.as_ref().clone(),
+                        TextureOptions::LINEAR,
+                    )
+                });
+                let avatar_radius = radius.max(7.0);
+                let rect = Rect::from_center_size(center, Vec2::splat(avatar_radius * 2.0));
+                shapes.push(Shape::image(
+                    texture.id(),
+                    rect,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                ));
+            }
+        }
+
         // Labels are progressive disclosure: hover/selection always shows one, and
         // the optional "label hubs" toggle shows only the most-followed accounts.
         let show_label = self.hovered
             || self.selected
             || self.dragged
             || (ctx.style.labels_always() && self.major);
-        if !show_label || self.label.is_empty() {
+        if !show_label || self.handle.is_empty() {
             return shapes;
         }
 
         let text_color = Color32::from_gray(235);
         let galley = ctx.ctx.fonts_mut(|fonts| {
-            fonts.layout_no_wrap(self.label.clone(), FontId::proportional(12.0), text_color)
+            fonts.layout_no_wrap(
+                self.handle.to_string(),
+                FontId::proportional(12.0),
+                text_color,
+            )
         });
         let label_pos = Pos2::new(
             center.x - galley.size().x / 2.0,
@@ -168,14 +215,11 @@ impl<E: Clone, Ty: EdgeType, Ix: IndexType> DisplayNode<MapNode, E, Ty, Ix> for 
     }
 
     fn update(&mut self, state: &NodeProps<MapNode>) {
+        // Payload-derived style is static; only interaction/location changes.
         self.pos = state.location();
         self.selected = state.selected;
         self.dragged = state.dragged;
         self.hovered = state.hovered;
-        self.color = community_color(state.payload.community);
-        self.label = state.label.clone();
-        self.radius = node_radius(state.payload.followers);
-        self.major = state.payload.major;
     }
 }
 
@@ -250,6 +294,8 @@ impl<N: Clone, Ty: EdgeType, Ix: IndexType, Dn: DisplayNode<N, MapEdge, Ty, Ix>>
         false
     }
 }
+
+const PROMINENT_MIN_FOLLOWERS: usize = 50;
 
 fn node_radius(followers: usize) -> f32 {
     1.4 + 2.6 * (followers as f32 + 1.0).log10()
@@ -386,8 +432,19 @@ fn island_radius(size: usize, node_spacing: f32) -> f32 {
     (node_spacing * (size as f32).sqrt() + 12.0).max(24.0)
 }
 
+fn prominent_dids_from_json(json_in: &str) -> Vec<String> {
+    let GraphFile { nodes, .. } =
+        serde_json::from_str::<GraphFile>(json_in).expect("invalid graph JSON");
+    nodes
+        .into_iter()
+        .filter(|node| node.followers.unwrap_or(0) >= PROMINENT_MIN_FOLLOWERS)
+        .map(|node| node.id)
+        .collect()
+}
+
 fn build(
     json_in: &str,
+    avatars: &HashMap<String, Arc<ColorImage>>,
 ) -> (
     egui_graphs::Graph<
         MapNode,
@@ -401,13 +458,15 @@ fn build(
     usize,
     usize,
 ) {
-    let value: Value = serde_json::from_str(json_in).expect("invalid graph JSON");
-    let edges: Vec<RawEdge> = serde_json::from_value(value["edges"].clone())
-        .expect("graph JSON is missing an `edges` array");
-    let raw_nodes: Vec<RawNode> =
-        serde_json::from_value(value["nodes"].clone()).unwrap_or_default();
+    let GraphFile {
+        nodes: raw_nodes,
+        edges,
+    } = serde_json::from_str(json_in).expect("invalid graph JSON");
 
+    #[cfg(not(target_arch = "wasm32"))]
     let mut handles = bsky::load_handles();
+    #[cfg(target_arch = "wasm32")]
+    let mut handles = HashMap::new();
     for node in &raw_nodes {
         if !node.handle.is_empty() {
             handles.insert(node.id.clone(), node.handle.clone());
@@ -450,7 +509,14 @@ fn build(
             .map(|node| node.community.unwrap_or(0))
             .collect()
     } else {
-        detect_communities(&adjacency)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            detect_communities(&adjacency)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            vec![0; n]
+        }
     };
 
     for (i, node) in raw_nodes.iter().enumerate() {
@@ -458,7 +524,9 @@ fn build(
             followers_count[i] = followers;
         }
     }
-    let positions = layout_map(&community, &followers_count, &adjacency);
+    let mut positions = layout_map(&community, &followers_count, &adjacency);
+
+    force_direct_inside_communities(&community, &adjacency, &mut positions);
 
     // Only draw a readable backbone by default: each account's top few follows,
     // plus every edge pointing at a well-followed hub. Hovering reveals that
@@ -484,37 +552,45 @@ fn build(
         }
     }
 
-    let mut major_nodes = vec![false; n];
-    let mut by_followers: Vec<usize> = (0..n).collect();
-    by_followers.sort_by(|&a, &b| {
-        followers_count[b]
-            .cmp(&followers_count[a])
+    // "Prominent" now means at least 50 sampled followers, not just the top 100.
+    let major_nodes: Vec<bool> = followers_count
+        .iter()
+        .map(|&followers| followers >= PROMINENT_MIN_FOLLOWERS)
+        .collect();
+    let mut stable: StableGraph<MapNode, MapEdge, Directed> = StableGraph::new();
+
+    // egui_graphs paints nodes in node-index order, and defers selected/dragged
+    // nodes until last. So: non-prominent first, prominent above them, and
+    // selection always ends up on top.
+    let mut draw_order: Vec<usize> = (0..n).collect();
+    draw_order.sort_by(|&a, &b| {
+        major_nodes[a]
+            .cmp(&major_nodes[b])
+            .then_with(|| followers_count[a].cmp(&followers_count[b]))
             .then_with(|| a.cmp(&b))
     });
-    for &node in by_followers.iter().take(100) {
-        major_nodes[node] = true;
-    }
 
-    let mut stable: StableGraph<MapNode, MapEdge, Directed> = StableGraph::new();
-    let mut ids = Vec::with_capacity(n);
-    for (i, raw) in raw_nodes.iter().enumerate() {
+    let mut ids = vec![petgraph::stable_graph::NodeIndex::new(0); n];
+    for i in draw_order {
+        let raw = &raw_nodes[i];
         let handle = if raw.handle.is_empty() {
             handles.get(&raw.id).cloned().unwrap_or_default()
         } else {
             raw.handle.clone()
         };
-        let label = if handle.is_empty() {
-            short_did(&raw.id)
+        let label: Arc<str> = if handle.is_empty() {
+            Arc::from(short_did(&raw.id))
         } else {
-            handle.clone()
+            Arc::from(handle)
         };
-        ids.push(stable.add_node(MapNode {
+        ids[i] = stable.add_node(MapNode {
             handle: label,
             followers: followers_count[i],
             community: community[i],
             major: major_nodes[i],
+            avatar: avatars.get(&raw.id).cloned(),
             pos: positions[i],
-        }));
+        });
     }
 
     for (i, &(a, b)) in parsed_edges.iter().enumerate() {
@@ -536,7 +612,6 @@ fn build(
             petgraph::stable_graph::DefaultIx,
             MapNodeShape,
         >| {
-            node.set_label(node.payload().handle.clone());
             node.set_location(node.payload().pos);
         },
         |_edge: &mut egui_graphs::Edge<
@@ -562,12 +637,8 @@ fn short_did(did: &str) -> String {
     did.rsplit(':').next().unwrap_or(did).to_owned()
 }
 
-pub fn display() -> Result<(), Box<dyn std::error::Error>> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 860.0]),
-        ..Default::default()
-    };
-
+#[cfg(not(target_arch = "wasm32"))]
+fn load_graph_json() -> Result<String, Box<dyn std::error::Error>> {
     // The seed graph contains every sampled account; graph.json is the
     // thresholded view used by the stats command.
     let path = if Path::new("graph_seeds.json").exists() {
@@ -575,44 +646,128 @@ pub fn display() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         "graph.json"
     };
-    let json = fs::read_to_string(path)?;
-    let (mut graph, node_count, shown_edges, community_count) = build(&json);
+    Ok(fs::read_to_string(path)?)
+}
 
-    let navigation = SettingsNavigation::new()
-        .with_zoom_and_pan_enabled(true)
-        .with_fit_to_screen_enabled(false)
-        .with_zoom_speed(0.1);
-    let interactions = SettingsInteraction::new()
-        .with_dragging_enabled(true)
-        .with_hover_enabled(true)
-        .with_node_selection_enabled(true);
+#[cfg(target_arch = "wasm32")]
+fn load_graph_json() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(include_str!("../graph_seeds.json").to_owned())
+}
 
-    let mut label_hubs = false;
+pub struct MapApp {
+    graph: egui_graphs::Graph<
+        MapNode,
+        MapEdge,
+        Directed,
+        petgraph::stable_graph::DefaultIx,
+        MapNodeShape,
+        MapEdgeShape,
+    >,
+    navigation: SettingsNavigation,
+    interactions: SettingsInteraction,
+    node_count: usize,
+    shown_edges: usize,
+    community_count: usize,
+    show_names: bool,
+    show_avatars: bool,
+}
 
-    eframe::run_ui_native("internetmap", options, move |ui, _frame| {
+impl MapApp {
+    fn from_parts(json: &str, avatars: HashMap<String, Arc<ColorImage>>) -> Self {
+        let (graph, node_count, shown_edges, community_count) = build(json, &avatars);
+
+        let navigation = SettingsNavigation::new()
+            .with_zoom_and_pan_enabled(true)
+            .with_fit_to_screen_enabled(false)
+            .with_zoom_speed(0.1);
+        let interactions = SettingsInteraction::new()
+            .with_dragging_enabled(true)
+            .with_hover_enabled(true)
+            .with_node_selection_enabled(true);
+
+        Self {
+            graph,
+            navigation,
+            interactions,
+            node_count,
+            shown_edges,
+            community_count,
+            show_names: true,
+            show_avatars: true,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let json = load_graph_json()?;
+        let prominent_dids = prominent_dids_from_json(&json);
+        // reqwest::blocking must not be created/dropped inside Tokio's async
+        // runtime, so run the avatar loader on a plain thread.
+        let avatars = std::thread::spawn(move || crate::avatars::load_avatars(&prominent_dids))
+            .join()
+            .unwrap_or_default();
+        Ok(Self::from_parts(&json, avatars))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let json = load_graph_json()?;
+        let prominent_dids = prominent_dids_from_json(&json);
+        let avatars = crate::avatars::load_avatars(&prominent_dids).await;
+        Ok(Self::from_parts(&json, avatars))
+    }
+
+    fn show(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("internetmap");
                 ui.separator();
-                ui.label(format!("{node_count} accounts"));
-                ui.label(format!("{community_count} communities"));
-                ui.label(format!("{shown_edges} follow edges drawn"));
+                ui.label(format!("{} accounts", self.node_count));
+                ui.label(format!("{} communities", self.community_count));
+                ui.label(format!("{} follow edges drawn", self.shown_edges));
                 ui.separator();
-                ui.checkbox(&mut label_hubs, "label top accounts");
+                ui.checkbox(&mut self.show_names, "show prominent names");
+                ui.checkbox(&mut self.show_avatars, "show prominent avatars");
                 ui.label("dot size = sampled followers · color = community");
                 ui.label("hover to highlight, click to pin a label");
             });
             ui.separator();
 
-            let style = SettingsStyle::new().with_labels_always(label_hubs);
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(Id::new("show_avatars"), self.show_avatars);
+            });
+
+            let style = SettingsStyle::new().with_labels_always(self.show_names);
             GraphView::<FixedState, FixedLayout>::new()
-                .with_navigations(&navigation)
-                .with_interactions(&interactions)
+                .with_navigations(&self.navigation)
+                .with_interactions(&self.interactions)
                 .with_styles(&style)
                 .with_id(Some("internetmap-map".to_owned()))
-                .show(ui, &mut graph);
+                .show(ui, &mut self.graph);
         });
-    })?;
+    }
+}
+
+impl eframe::App for MapApp {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.show(ui);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(&mut *self)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn display() -> Result<(), Box<dyn std::error::Error>> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 860.0]),
+        ..Default::default()
+    };
+
+    let app = MapApp::new()?;
+    eframe::run_native("internetmap", options, Box::new(|_cc| Ok(Box::new(app))))?;
 
     Ok(())
 }

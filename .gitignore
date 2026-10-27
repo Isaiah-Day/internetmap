@@ -15,3 +15,10 @@ graph_seeds.json
 graph_seeds_min_followers.json
 fetch.log
 fetch.pid
+avatars.json
+avatar_cache/
+
+# WASM output
+/pkg
+
+# /standalone.html
